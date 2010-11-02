@@ -9,16 +9,23 @@
            #:+pollin+ #:+pollout+ #:+pollerr+
 
            #:zmq-error #:zmq-error-code #:zmq-again
-           
-           #:msg #:msg-close #:msg-copy #:with-msg
 
-           #:socket #:socket-close #:bind #:connect
-           #:getsocktopt-str #:getsockopt-num #:setsockopt
-           #:send #:recv #:poll))
+           #:with-msg #:with-msg-init
+           #:msg-close #:msg-copy
+           #:msg-string #:msg-vector #:msg-size #:msg-data
+
+           #:socket #:socket-close #:with-socket #:bind #:connect
+           #:getsocktopt-str #:getsockopt-num #:setsockopt-str
+           #:send #:recv #:poll
+
+           #:start-helper #:close-helper #:with-zmq))
 
 (in-package :zmq)
 
 (load "libzmq.so")
+(let ((dir (excl:path-pathname (asdf:system-relative-pathname :acl-zmq ""))))
+  (unless (zerop (excl:run-shell-command (format nil "make -C ~a zeromq-thread.so" dir)))
+    (error "building zeromq-thread.so failed")))
 (load (asdf:system-relative-pathname :acl-zmq "zeromq-thread.so"))
 
 ;; Constants
@@ -68,7 +75,7 @@
     ((errnum :int)) :returning ((* :char)))
 
 (define-condition zmq-error (simple-error)
-  ((code :initarg code :reader zmq-error-code)))
+  ((code :initarg :code :reader zmq-error-code)))
 (define-condition zmq-again (zmq-error) ())
 (defun zmq-error (code)
   (error (if (eq code excl::*eagain*) 'zmq-again 'zmq-error)
@@ -108,27 +115,47 @@
 (foreign-functions:def-foreign-call (memcpy "memcpy")
     ((dst (* :void)) (src (* :void)) (len :long)) :returning ((* :void)))
 
-(defun msg (&key size data)
-  (let ((struct (excl:aclmalloc (ff:sizeof-fobject 'msg))))
-    (cond (size (msg-init-size struct size))
-          (data (etypecase data
-                  (string
-                   (excl:with-native-string (str data :native-length-var len)
-                     (msg-init-size struct len)
-                     (memcpy (msg-data struct) str len)))
-                  ((simple-array (unsigned-byte 8))
-                   (msg-init-size struct (length data))
-                   (memcpy (msg-data struct)
-                           (+ (excl:lispval-to-address data) ;; TODO test this
-                              #.(sys::mdparam 'comp::md-lvector-data0-norm))
-                           (length data)))))
-          (t (msg-init struct)))
-    struct))
+(defun expand-init-msg (msg size string vector)
+  (cond (vector `(msg-init-vector ,msg ,vector))
+        (string `(msg-init-string ,msg ,string))
+        (size `(msg-init-size ,msg ,size))
+        (t `(msg-init ,msg))))
 
-(defmacro with-msg ((var &rest args) &body body)
-  `(let ((,var (msg ,@args)))
+(defun msg-init-string (msg string)
+  (excl:with-native-string (str string :native-length-var len)
+    (msg-init-size msg len)
+    (memcpy (msg-data msg) str len)))
+(defun msg-init-vector (msg vec)
+  (let ((len (length vec)))
+    (msg-init-size msg len)
+    (memcpy (msg-data msg)
+            (+ (excl:lispval-to-address vec) ;; TODO test this
+               #.(sys::mdparam 'comp::md-lvector-data0-norm))
+            len)))
+
+(defmacro with-msg ((var &key size string vector) &body body)
+  `(let ((,var (ff:allocate-fobject 'msg :c)))
+     ,(expand-init-msg var size string vector)
      (unwind-protect (progn ,@body)
-       (msg-close ,var))))
+       (msg-close ,var)
+       (ff:free-fobject ,var))))
+(defmacro with-msg-init ((msg &key size string vector) &body body)
+  (let ((var (gensym)))
+    `(let ((,var ,msg))
+       ,(expand-init-msg var size string vector)
+       (unwind-protect (progn ,@body)
+         (msg-close ,var)))))
+
+;; TODO zero-copy
+(defun msg-string (msg)
+  (excl:native-to-string (msg-data msg) :length (msg-size msg)))
+(defun msg-vector (msg)
+  (let* ((len (msg-size msg))
+         (vec (make-array len :element-type '(unsigned-byte 8))))
+    (memcpy (+ (excl:lispval-to-address vec) ;; TODO test this
+               #.(sys::mdparam 'comp::md-lvector-data0-norm))
+            (msg-data msg) len)
+    vec))
 
 ;; C companion thread (see zeromq-thread.c)
 
@@ -162,8 +189,7 @@
 
 (defstruct zmq-context
   (lock (mp:make-process-lock))
-  context
-  (refcount 0))
+  context)
 
 (defstruct zmq-thread
   input
@@ -171,43 +197,40 @@
   struct)
 
 (defvar *context* (make-zmq-context))
-(defvar *thread*)
+(defvar *helper*)
 
-(defun start-zmq-thread ()
+(defun start-helper ()
   (mp:with-process-lock ((zmq-context-lock *context*))
-    (when (eq (zmq-context-refcount *context*) 0)
+    (unless (zmq-context-context *context*)
       (multiple-value-bind (context errno) (zmq-init 1)
         (when (eq context 0) (zmq-error errno))
-        (setf (zmq-context-context *context*) context)))
-    (incf (zmq-context-refcount *context*)))
+        (setf (zmq-context-context *context*) context))))
   (multiple-value-bind (in out) (excl.osi:pipe)
     (let ((struct (zmq-thread-init (zmq-context-context *context*) (excl:stream-output-fn out))))
       (make-zmq-thread :input in :output out :struct struct))))
 
-(defun close-zmq-thread (thread)
-  (mp:with-process-lock ((zmq-context-lock *context*))
-    (when (eq (decf (zmq-context-refcount *context*)) 0)
-      (zmq-term (zmq-context-context *context*))))
+;; TODO verify that thread dies
+(defun close-helper (thread)
   (setf (struct-slot (zmq-thread-struct thread) 'arg-command) 0)
   (ipc.posix:sem-up (struct-addr (zmq-thread-struct thread) 'sem))
   (close (zmq-thread-input thread)))
 
 (defmacro with-zmq (&body body)
-  `(let ((*thread* (start-zmq-thread)))
+  `(let ((*helper* (start-helper)))
     (unwind-protect (progn ,@body)
-      (close-zmq-thread *thread*))))
+      (close-helper *helper*))))
 
 ;; Access through companion thread
 
 (defmacro zmq-thread-access (code returns errval &body args)
   (flet ((arg (name) (intern (format nil "~a~a" :arg- name))))
     (let ((struct (gensym)))
-      `(let ((,struct (zmq-thread-struct *thread*)))
+      `(let ((,struct (zmq-thread-struct *helper*)))
          ,@(loop :for (field val) :in args :collect
               `(setf (struct-slot ,struct ',(arg field)) ,val))
          (setf (struct-slot ,struct 'arg-command) ,code)
          (ipc.posix:sem-up (struct-addr ,struct 'sem))
-         (assert (eql (read-char (zmq-thread-input *thread*)) #\K))
+         (assert (eql (read-char (zmq-thread-input *helper*)) #\K))
          (let ((ret (struct-slot ,struct ',(arg returns))))
            (when (eq ret ,errval) (zmq-error (struct-slot ,struct 'arg-command)))
            ret)))))
@@ -218,6 +241,10 @@
 (defun socket-close (socket)
   (zmq-thread-access 2 int -1
     (socket socket)))
+
+(defmacro with-socket ((var type) &body body)
+  `(let ((,var (socket ,type)))
+     (unwind-protect (progn ,@body) (socket-close ,var))))
   
 (defun bind (socket string)
   (zmq-thread-access 3 int -1
@@ -237,7 +264,7 @@
              (int option)
              (string buf)
              (len max-length))
-           (excl:native-to-string buf :length (struct-slot (zmq-thread-struct *thread*) 'arg-len)))
+           (excl:native-to-string buf :length (struct-slot (zmq-thread-struct *helper*) 'arg-len)))
       (excl:aclfree buf))))
 (defun getsockopt-num (socket option)
   (ff:with-static-fobjects ((opt :long))
@@ -255,12 +282,12 @@
     (string (excl:string-to-native value)) ;; TODO other types
     (len (or length (length value)))))
 
-(defun send (socket msg flags)
+(defun send (socket msg &optional (flags 0))
   (zmq-thread-access 7 int -1
     (socket socket)
     (msg msg)
     (int flags)))
-(defun recv (socket msg flags)
+(defun recv (socket msg &optional (flags 0))
   (zmq-thread-access 8 int -1
     (socket socket)
     (msg msg)
@@ -283,9 +310,9 @@
 (defun init-pollitems (pollitems itemvar handlervar)
   `(setf ,@(loop :for item :in pollitems :for index :from 0 :append
               (destructuring-bind ((&key socket fd event) body) item
-                `((ff:fslot-value-typed 'pollitem :static ,itemvar ,index 'socket) ,(or socket 0)
-                  (ff:fslot-value-typed 'pollitem :static ,itemvar ,index 'fd) ,(or fd -1)
-                  (ff:fslot-value-typed 'pollitem :static ,itemvar ,index 'events) ,(or event +pollin+)
+                `((ff:fslot-value-typed '(:array pollitem) :c ,itemvar ,index 'socket) ,(or socket 0)
+                  (ff:fslot-value-typed '(:array pollitem) :c ,itemvar ,index 'fd) ,(or fd -1)
+                  (ff:fslot-value-typed '(:array pollitem) :c ,itemvar ,index 'events) ,(or event +pollin+)
                   (aref ,handlervar ,index) ,body)))))
 
 (defun parse-poll-clauses (clauses)
@@ -306,13 +333,13 @@
       `(block nil
          (let ((,handlers (make-array ,nitems))
                ,@(if timeout `((,timeoutfunc ,(second timeout)))))
-           (ff:with-static-fobject (,items `(:array pollitem ,,nitems))
-             ,@(init-pollitems pollitems items handlers)
+           (ff:with-static-fobject (,items `(:array pollitem ,,nitems) :allocation :c)
+             ,(init-pollitems pollitems items handlers)
              (loop
                 (let ((count (do-poll ,items ,nitems ,(if timeout (first timeout) -1))))
                   (if (plusp count)
                       (dotimes (i ,nitems)
-                        (when (plusp (ff:fslot-value-typed 'pollitem :static ,items i 'revents))
+                        (when (plusp (ff:fslot-value-typed '(:array pollitem) :c ,items i 'revents))
                           (funcall (aref ,handlers i))
                           (when (zerop (decf count)) (return))))
                       ,@(when timeout `((funcall ,timeoutfunc))))))))))))
