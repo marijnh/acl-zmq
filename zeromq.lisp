@@ -18,7 +18,7 @@
            #:getsocktopt-str #:getsockopt-num #:setsockopt-str #:setsockopt-num
            #:send #:recv #:poll
 
-           #:start-helper #:close-helper #:with-zmq))
+           #:start-helper #:close-helper #:with-zmq #:*helper*))
 
 (in-package :zmq)
 
@@ -204,9 +204,12 @@
   (close (zmq-thread-input thread)))
 
 (defmacro with-zmq (&body body)
-  `(let ((*helper* (start-helper)))
-    (unwind-protect (progn ,@body)
-      (close-helper *helper*))))
+  (let ((already-bound (gensym)))
+    `(let* ((,already-bound (boundp '*helper*))
+            (*helper* (if ,already-bound *helper* (start-helper))))
+       (unwind-protect (progn ,@body)
+         (unless ,already-bound
+           (close-helper *helper*))))))
 
 ;; Access through companion thread
 
