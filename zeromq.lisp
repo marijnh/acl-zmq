@@ -15,7 +15,7 @@
            #:msg-string #:msg-vector #:msg-size #:msg-data
 
            #:socket #:socket-close #:with-socket #:bind #:connect
-           #:getsocktopt-str #:getsockopt-num #:setsockopt-str
+           #:getsocktopt-str #:getsockopt-num #:setsockopt-str #:setsockopt-num
            #:send #:recv #:poll
 
            #:start-helper #:close-helper #:with-zmq))
@@ -272,15 +272,23 @@
       (socket socket)
       (int option)
       (string (ff:fslot-address opt))
-      (len (ff:sizeof-fobject :long)))
+      (len #.(ff:sizeof-fobject :long)))
     (ff:fslot-value opt)))
 
 (defun setsockopt-str (socket option value &optional length)
   (zmq-thread-access 6 int -1
     (socket socket)
     (int option)
-    (string (excl:string-to-native value)) ;; TODO other types
+    (string (excl:string-to-native value))
     (len (or length (length value)))))
+(defun setsockopt-num (socket option value)
+  (ff:with-static-fobjects ((opt :long))
+    (setf (ff:fslot-value opt) value)
+    (zmq-thread-access 6 int -1
+      (socket socket)
+      (int option)
+      (string (ff:fslot-address opt))
+      (len #.(ff:sizeof-fobject :long)))))
 
 (defun send (socket msg &optional (flags 0))
   (zmq-thread-access 7 int -1
