@@ -10,8 +10,8 @@
         (zmq:bind sock "tcp://*:11331")
         (dotimes (i 30)
           (sleep .1)
-          (zmq:with-msg-init (msg :string "hello there")
-            (zmq:send sock msg)))))))
+          (zmq:msg-init-string msg "hello there")
+          (zmq:send sock msg))))))
 
 (defun sub-test ()
   (zmq:with-zmq
@@ -26,6 +26,7 @@
             ((:socket sock)
              (zmq:recv sock msg)
              (assert (equal (zmq:msg-string msg) "hello there"))
+             (zmq:msg-close msg)
              (incf saw-msg))
             ((:timeout 100000)
              (when (> (/ (- (get-internal-real-time) start-time)

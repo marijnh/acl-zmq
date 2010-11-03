@@ -10,8 +10,8 @@
 
            #:zmq-error #:zmq-error-code #:zmq-again
 
-           #:with-msg #:with-msg-init
-           #:msg-close #:msg-copy
+           #:msg-init #:msg-init-size #:msg-init-string #:msg-init-vector
+           #:with-msg #:msg-close #:msg-copy
            #:msg-string #:msg-vector #:msg-size #:msg-data
 
            #:socket #:socket-close #:with-socket #:bind #:connect
@@ -115,12 +115,6 @@
 (foreign-functions:def-foreign-call (memcpy "memcpy")
     ((dst (* :void)) (src (* :void)) (len :long)) :returning ((* :void)))
 
-(defun expand-init-msg (msg size string vector)
-  (cond (vector `(msg-init-vector ,msg ,vector))
-        (string `(msg-init-string ,msg ,string))
-        (size `(msg-init-size ,msg ,size))
-        (t `(msg-init ,msg))))
-
 (defun msg-init-string (msg string)
   (excl:with-native-string (str string :native-length-var len)
     (msg-init-size msg len)
@@ -129,22 +123,17 @@
   (let ((len (length vec)))
     (msg-init-size msg len)
     (memcpy (msg-data msg)
-            (+ (excl:lispval-to-address vec) ;; TODO test this
+            (+ (excl:lispval-to-address vec)
                #.(sys::mdparam 'comp::md-lvector-data0-norm))
             len)))
 
-(defmacro with-msg ((var &key size string vector) &body body)
-  `(let ((,var (ff:allocate-fobject 'msg :c)))
-     ,(expand-init-msg var size string vector)
+(defmacro with-msg ((&rest vars) &body body)
+  `(let ,(loop :for var :in vars :collect `(,var (ff:allocate-fobject 'msg :c)))
+     ,@(loop :for var :in vars :collect `(msg-init ,var))
      (unwind-protect (progn ,@body)
-       (msg-close ,var)
-       (ff:free-fobject ,var))))
-(defmacro with-msg-init ((msg &key size string vector) &body body)
-  (let ((var (gensym)))
-    `(let ((,var ,msg))
-       ,(expand-init-msg var size string vector)
-       (unwind-protect (progn ,@body)
-         (msg-close ,var)))))
+       ,@(loop :for var :in vars :append
+            `((msg-close ,var)
+              (ff:free-fobject ,var))))))
 
 ;; TODO zero-copy
 (defun msg-string (msg)
@@ -152,7 +141,7 @@
 (defun msg-vector (msg)
   (let* ((len (msg-size msg))
          (vec (make-array len :element-type '(unsigned-byte 8))))
-    (memcpy (+ (excl:lispval-to-address vec) ;; TODO test this
+    (memcpy (+ (excl:lispval-to-address vec)
                #.(sys::mdparam 'comp::md-lvector-data0-norm))
             (msg-data msg) len)
     vec))
@@ -209,7 +198,6 @@
     (let ((struct (zmq-thread-init (zmq-context-context *context*) (excl:stream-output-fn out))))
       (make-zmq-thread :input in :output out :struct struct))))
 
-;; TODO verify that thread dies
 (defun close-helper (thread)
   (setf (struct-slot (zmq-thread-struct thread) 'arg-command) 0)
   (ipc.posix:sem-up (struct-addr (zmq-thread-struct thread) 'sem))
@@ -332,10 +320,10 @@
           (:socket (push `((:socket ,arg :event ,event) (lambda () ,@body)) pollitems))
           (:timeout (when timeout (error "duplicate :timeout clause in do-polling"))
                     (setf timeout (list arg `(lambda () ,@body)))))))
-    (list (nreverse pollitems) timeout)))
+    (values (nreverse pollitems) timeout)))
 
 (defmacro poll (&body clauses)
-  (destructuring-bind (pollitems timeout) (parse-poll-clauses clauses)
+  (multiple-value-bind (pollitems timeout) (parse-poll-clauses clauses)
     (let ((nitems (length pollitems))
           (handlers (gensym)) (items (gensym)) (timeoutfunc (gensym)))
       `(block nil
