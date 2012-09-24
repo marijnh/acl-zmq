@@ -148,6 +148,11 @@
 
 ;; C companion thread (see zeromq-thread.c)
 
+(ff:def-foreign-type sem
+    (:union
+     (nil (:array :unsigned-char 32))
+     (align :fixnum)))
+
 (ff:def-foreign-type thread-struct
     (:struct
      (arg-socket (* :void))
@@ -160,8 +165,17 @@
      (signal-fd :int)
      (pad :int)
      (context (* :void))
-     (sem ipc.posix:sem)
+     (sem sem)
      (pthread :long)))
+
+(ff:def-foreign-call (sem_post "sem_post")
+    ((sem (* :void)))
+  :error-value :errno)
+
+(defun sem-up (sem)
+  (multiple-value-bind (res err) (sem_post sem)
+    (if (not (zerop res))
+	(excl::perror err "sem_post"))))
 
 (defmacro struct-slot (val &rest slot)
   `(ff:fslot-value-typed 'thread-struct :c ,val ,@slot))
@@ -200,7 +214,7 @@
 
 (defun close-helper (thread)
   (setf (struct-slot (zmq-thread-struct thread) 'arg-command) 0)
-  (ipc.posix:sem-up (struct-addr (zmq-thread-struct thread) 'sem))
+  (sem-up (struct-addr (zmq-thread-struct thread) 'sem))
   (close (zmq-thread-input thread)))
 
 (defmacro with-zmq (&body body)
@@ -220,7 +234,7 @@
          ,@(loop :for (field val) :in args :collect
               `(setf (struct-slot ,struct ',(arg field)) ,val))
          (setf (struct-slot ,struct 'arg-command) ,code)
-         (ipc.posix:sem-up (struct-addr ,struct 'sem))
+         (sem-up (struct-addr ,struct 'sem))
          (assert (eql (read-char (zmq-thread-input *helper*)) #\K))
          (let ((ret (struct-slot ,struct ',(arg returns))))
            (when (eq ret ,errval) (zmq-error (struct-slot ,struct 'arg-command)))

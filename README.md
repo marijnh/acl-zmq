@@ -57,10 +57,5 @@ out to `make` and `gcc` at load time. Thus, in its current form,
 there's not much hope for running this out of the box on non-Linux/BSD
 platforms. The code uses POSIX semaphores as well.
 
-The module currently depends on semaphore bindings from `shared-mem`
-module that is internal to AllegroGraph. If anyone outside the team is
-interested in using this, drop me an e-mail, I'll add the relevant
-code to the repository.
-
 [1]: https://github.com/hanshuebner/acl-zmq
 [2]: http://repo.or.cz/w/cl-zmq.git/
