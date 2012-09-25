@@ -1,10 +1,11 @@
 (defpackage :zmq
+  (:nicknames :zeromq)
   (:use :cl)
   (:export #:+p2p+ #:+pub+ #:+sub+ #:+req+ #:+rep+ #:+xreq+ #:+xrep+ #:+upstream+ #:+downstream+
 
            #:+hwm+ #:+swap+ #:+affinity+ #:+identity+ #:+subscribe+ #:+unsubscribe+ #:+rate+
            #:+recovery-ivl+ #:+mcast-loop+ #:+sndbuf+ #:+rcvbuf+ #:+rcvmore+
-           
+
            #:+noblock+ #:+sndmore+
            #:+pollin+ #:+pollout+ #:+pollerr+
 
@@ -235,7 +236,8 @@
               `(setf (struct-slot ,struct ',(arg field)) ,val))
          (setf (struct-slot ,struct 'arg-command) ,code)
          (sem-up (struct-addr ,struct 'sem))
-         (assert (eql (read-char (zmq-thread-input *helper*)) #\K))
+         (assert (eql (read-byte (zmq-thread-input *helper*))
+                      #.(char-code #\K)))
          (let ((ret (struct-slot ,struct ',(arg returns))))
            (when (eq ret ,errval) (zmq-error (struct-slot ,struct 'arg-command)))
            ret)))))
@@ -250,7 +252,7 @@
 (defmacro with-socket ((var type) &body body)
   `(let ((,var (socket ,type)))
      (unwind-protect (progn ,@body) (socket-close ,var))))
-  
+
 (defun bind (socket string)
   (zmq-thread-access 3 int -1
     (socket socket)
