@@ -1,5 +1,5 @@
-(defpackage :zmq
-  (:nicknames :zeromq)
+(defpackage :acl-zmq
+  (:nicknames :zmq :zeromq)
   (:use :cl)
   (:export #:+p2p+ #:+pub+ #:+sub+ #:+req+ #:+rep+ #:+xreq+ #:+xrep+
            #:+upstream+ #:+downstream+
@@ -22,14 +22,26 @@
 
            #:start-helper #:close-helper #:with-zmq #:*helper*))
 
-(in-package :zmq)
+(in-package :acl-zmq)
+
+#+Windows
+(error "Library :acl-zmq not yet supported on Windows.")
+
+(defvar *acl-zmq-dir*
+    (directory-namestring
+     (or *load-truename* *load-pathname* *compile-file-truename*)))
+
+(defvar *acl-zmq-machine*
+    (first (excl.osi:command-output "uname -m")))
 
 (load "libzmq.so")
-(let ((dir (excl:path-pathname (asdf:system-relative-pathname :acl-zmq ""))))
-  (unless (zerop (excl:run-shell-command
-                  (format nil "make -C ~a zeromq-thread.so" dir)))
-    (error "building zeromq-thread.so failed")))
-(load (asdf:system-relative-pathname :acl-zmq "zeromq-thread.so"))
+(let* ((filename (format nil "acl-zmq-~a.so" *acl-zmq-machine*))
+       (pathname (merge-pathnames filename *acl-zmq-dir*)))
+  (unless (probe-file pathname)
+    (unless (zerop (excl:run-shell-command
+                    (format nil "make -C ~a ~a" *acl-zmq-dir* filename)))
+      (error "Building ~a failed." filename)))
+  (load pathname))
 
 ;; Constants
 
