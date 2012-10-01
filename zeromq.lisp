@@ -24,24 +24,27 @@
 
 (in-package :acl-zmq)
 
-#+Windows
-(error "Library :acl-zmq not yet supported on Windows.")
-
 (defvar *acl-zmq-dir*
     (directory-namestring
      (or *load-truename* *load-pathname* *compile-file-truename*)))
 
-(defvar *acl-zmq-machine*
-    (first (excl.osi:command-output "uname -m")))
+#+mswindows
+(progn
+  (error "Library :acl-zmq not yet supported on Windows."))
 
-(load "libzmq.so")
-(let* ((filename (format nil "acl-zmq-~a.so" *acl-zmq-machine*))
-       (pathname (merge-pathnames filename *acl-zmq-dir*)))
-  (unless (probe-file pathname)
-    (unless (zerop (excl:run-shell-command
-                    (format nil "make -C ~a ~a" *acl-zmq-dir* filename)))
-      (error "Building ~a failed." filename)))
-  (load pathname))
+#+linux
+(progn
+  (defvar *acl-zmq-machine*
+      (first (excl.osi:command-output "uname -m")))
+
+  (load "libzmq.so")
+  (let* ((filename (format nil "acl-zmq-~a.so" *acl-zmq-machine*))
+         (pathname (merge-pathnames filename *acl-zmq-dir*)))
+    (unless (probe-file pathname)
+      (unless (zerop (excl:run-shell-command
+                      (format nil "make -C ~a ~a" *acl-zmq-dir* filename)))
+        (error "Building ~a failed." filename)))
+    (load pathname)))
 
 ;; Constants
 
